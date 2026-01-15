@@ -1,0 +1,55 @@
+server:
+  port: 8083
+
+spring:
+  application:
+    name: playback-service
+
+  datasource:
+    url: ${DATABASE_URL:jdbc:postgresql://localhost:5432/streamflix_playback}
+    username: ${DATABASE_USERNAME:streamflix}
+    password: ${DATABASE_PASSWORD:streamflix}
+    hikari:
+      maximum-pool-size: 30
+
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+        jdbc:
+          batch_size: 100
+    open-in-view: false
+
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+      acks: all
+
+# Playback Configuration
+playback:
+  progress-update-interval-seconds: 10
+  completion-threshold-percent: 90
+  max-concurrent-streams: 4
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+
+logging:
+  level:
+    com.streamflix.playback: DEBUG

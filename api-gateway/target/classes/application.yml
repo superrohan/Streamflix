@@ -1,0 +1,308 @@
+server:
+  port: 8080
+  netty:
+    connection-timeout: 30s
+    idle-timeout: 60s
+
+spring:
+  application:
+    name: api-gateway
+  profiles:
+    active: ${SPRING_PROFILES_ACTIVE:dev}
+
+  # Cloud Config (disabled for local dev, enable in prod)
+  cloud:
+    config:
+      enabled: false
+      uri: ${CONFIG_SERVER_URI:http://localhost:8888}
+      fail-fast: false
+
+    # Gateway Configuration
+    gateway:
+      # Global defaults
+      default-filters:
+        - name: RequestRateLimiter
+          args:
+            redis-rate-limiter:
+              replenishRate: 100
+              burstCapacity: 200
+              requestedTokens: 1
+            key-resolver: "#{@userKeyResolver}"
+        - name: CircuitBreaker
+          args:
+            name: defaultCircuitBreaker
+            fallbackUri: forward:/fallback
+        - DedupeResponseHeader=Access-Control-Allow-Origin Access-Control-Allow-Credentials, RETAIN_UNIQUE
+
+      # CORS Configuration
+      globalcors:
+        corsConfigurations:
+          '[/**]':
+            allowedOriginPatterns: "*"
+            allowedMethods:
+              - GET
+              - POST
+              - PUT
+              - PATCH
+              - DELETE
+              - OPTIONS
+            allowedHeaders: "*"
+            allowCredentials: true
+            maxAge: 3600
+
+      # Route Definitions
+      routes:
+        # Auth Service Routes
+        - id: auth-service
+          uri: ${AUTH_SERVICE_URI:http://localhost:8081}
+          predicates:
+            - Path=/api/v1/auth/**
+          filters:
+            - StripPrefix=0
+            - name: CircuitBreaker
+              args:
+                name: authServiceCircuitBreaker
+                fallbackUri: forward:/fallback/auth
+
+        # User Profile Routes (requires authentication)
+        - id: profile-service
+          uri: ${AUTH_SERVICE_URI:http://localhost:8081}
+          predicates:
+            - Path=/api/v1/users/**, /api/v1/profiles/**
+          filters:
+            - StripPrefix=0
+            - JwtAuthentication
+            - name: CircuitBreaker
+              args:
+                name: profileServiceCircuitBreaker
+
+        # Content Catalog Routes
+        - id: content-catalog-service
+          uri: ${CONTENT_SERVICE_URI:http://localhost:8082}
+          predicates:
+            - Path=/api/v1/content/**, /api/v1/movies/**, /api/v1/series/**, /api/v1/genres/**
+          filters:
+            - StripPrefix=0
+            - JwtAuthentication
+            - name: CircuitBreaker
+              args:
+                name: contentServiceCircuitBreaker
+            - name: Retry
+              args:
+                retries: 3
+                statuses: BAD_GATEWAY,SERVICE_UNAVAILABLE
+                methods: GET
+                backoff:
+                  firstBackoff: 100ms
+                  maxBackoff: 500ms
+                  factor: 2
+
+        # Playback Service Routes
+        - id: playback-service
+          uri: ${PLAYBACK_SERVICE_URI:http://localhost:8083}
+          predicates:
+            - Path=/api/v1/playback/**, /api/v1/watch-history/**
+          filters:
+            - StripPrefix=0
+            - JwtAuthentication
+            - RequireProfile
+            - name: CircuitBreaker
+              args:
+                name: playbackServiceCircuitBreaker
+
+        # Recommendation Service Routes
+        - id: recommendation-service
+          uri: ${RECOMMENDATION_SERVICE_URI:http://localhost:8084}
+          predicates:
+            - Path=/api/v1/recommendations/**, /api/v1/trending/**
+          filters:
+            - StripPrefix=0
+            - JwtAuthentication
+            - name: CircuitBreaker
+              args:
+                name: recommendationServiceCircuitBreaker
+            - name: Retry
+              args:
+                retries: 2
+                statuses: SERVICE_UNAVAILABLE
+
+        # Search Service Routes
+        - id: search-service
+          uri: ${SEARCH_SERVICE_URI:http://localhost:8086}
+          predicates:
+            - Path=/api/v1/search/**
+          filters:
+            - StripPrefix=0
+            - JwtAuthentication
+            - name: CircuitBreaker
+              args:
+                name: searchServiceCircuitBreaker
+
+        # Analytics Service Routes (Admin only)
+        - id: analytics-service
+          uri: ${ANALYTICS_SERVICE_URI:http://localhost:8085}
+          predicates:
+            - Path=/api/v1/analytics/**
+          filters:
+            - StripPrefix=0
+            - JwtAuthentication
+            - RequireRole=ROLE_ADMIN,ROLE_ANALYTICS_VIEWER
+            - name: CircuitBreaker
+              args:
+                name: analyticsServiceCircuitBreaker
+
+        # Canary Route Example (weighted routing)
+        - id: content-catalog-canary
+          uri: ${CONTENT_SERVICE_CANARY_URI:http://localhost:8082}
+          predicates:
+            - Path=/api/v1/content/**
+            - Weight=content-group, 10
+          filters:
+            - StripPrefix=0
+            - JwtAuthentication
+            - AddRequestHeader=X-Canary, true
+          metadata:
+            canary: true
+
+  # Redis Configuration
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD:}
+      timeout: 2000ms
+      lettuce:
+        pool:
+          max-active: 50
+          max-idle: 10
+          min-idle: 5
+          max-wait: 1000ms
+
+# JWT Configuration
+jwt:
+  secret: ${JWT_SECRET:your-256-bit-secret-key-for-development-only-change-in-production}
+  expiration: 3600000  # 1 hour
+  refresh-expiration: 604800000  # 7 days
+
+# Rate Limiting Configuration
+rate-limit:
+  enabled: true
+  default:
+    requests-per-second: 100
+    burst-capacity: 200
+  endpoints:
+    "/api/v1/auth/login":
+      requests-per-second: 5
+      burst-capacity: 10
+    "/api/v1/search/**":
+      requests-per-second: 50
+      burst-capacity: 100
+
+# Resilience4j Configuration
+resilience4j:
+  circuitbreaker:
+    configs:
+      default:
+        slidingWindowSize: 100
+        slidingWindowType: COUNT_BASED
+        minimumNumberOfCalls: 10
+        permittedNumberOfCallsInHalfOpenState: 5
+        automaticTransitionFromOpenToHalfOpenEnabled: true
+        waitDurationInOpenState: 30s
+        failureRateThreshold: 50
+        slowCallRateThreshold: 80
+        slowCallDurationThreshold: 2s
+        recordExceptions:
+          - java.io.IOException
+          - java.util.concurrent.TimeoutException
+          - org.springframework.web.client.HttpServerErrorException
+    instances:
+      authServiceCircuitBreaker:
+        baseConfig: default
+      contentServiceCircuitBreaker:
+        baseConfig: default
+        slidingWindowSize: 200
+        waitDurationInOpenState: 20s
+      playbackServiceCircuitBreaker:
+        baseConfig: default
+      recommendationServiceCircuitBreaker:
+        baseConfig: default
+        failureRateThreshold: 60
+      searchServiceCircuitBreaker:
+        baseConfig: default
+      analyticsServiceCircuitBreaker:
+        baseConfig: default
+
+  timelimiter:
+    configs:
+      default:
+        timeoutDuration: 10s
+        cancelRunningFuture: true
+    instances:
+      authServiceCircuitBreaker:
+        timeoutDuration: 5s
+      contentServiceCircuitBreaker:
+        timeoutDuration: 8s
+
+  bulkhead:
+    configs:
+      default:
+        maxConcurrentCalls: 100
+        maxWaitDuration: 100ms
+    instances:
+      playbackServiceCircuitBreaker:
+        maxConcurrentCalls: 200
+
+# Actuator Endpoints
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus,gateway
+      base-path: /actuator
+  endpoint:
+    health:
+      show-details: when_authorized
+      probes:
+        enabled: true
+    gateway:
+      enabled: true
+  metrics:
+    tags:
+      application: ${spring.application.name}
+    export:
+      prometheus:
+        enabled: true
+  health:
+    circuitbreakers:
+      enabled: true
+    ratelimiters:
+      enabled: true
+
+# Logging Configuration
+logging:
+  level:
+    root: INFO
+    com.streamflix.gateway: DEBUG
+    org.springframework.cloud.gateway: DEBUG
+    io.github.resilience4j: DEBUG
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%X{correlationId}] [%thread] %-5level %logger{36} - %msg%n"
+
+---
+# Production Profile
+spring:
+  config:
+    activate:
+      on-profile: prod
+
+  cloud:
+    config:
+      enabled: true
+      fail-fast: true
+
+logging:
+  level:
+    root: WARN
+    com.streamflix.gateway: INFO
+    org.springframework.cloud.gateway: WARN

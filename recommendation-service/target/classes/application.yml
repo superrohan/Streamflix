@@ -1,0 +1,60 @@
+server:
+  port: 8084
+
+spring:
+  application:
+    name: recommendation-service
+
+  datasource:
+    url: ${DATABASE_URL:jdbc:postgresql://localhost:5432/streamflix_recommendation}
+    username: ${DATABASE_USERNAME:streamflix}
+    password: ${DATABASE_PASSWORD:streamflix}
+    hikari:
+      maximum-pool-size: 20
+
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    consumer:
+      group-id: recommendation-service
+      auto-offset-reset: earliest
+      enable-auto-commit: false
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
+      properties:
+        spring.json.trusted.packages: com.streamflix.*
+
+# Recommendation Configuration
+recommendation:
+  trending:
+    time-window-hours: 24
+    refresh-interval-minutes: 15
+    max-items: 50
+  personalized:
+    max-items: 40
+    genre-weight: 0.4
+    recency-weight: 0.3
+    popularity-weight: 0.3
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+
+logging:
+  level:
+    com.streamflix.recommendation: DEBUG
